@@ -23,10 +23,96 @@ body {
   min-width: 320px;
 }
 
+button {
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 6px;
+  background: rgb(244 247 240 / 92%);
+  color: #162028;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  min-width: 88px;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 #game-canvas {
   display: block;
   width: 100vw;
   height: 100vh;
   outline: none;
   touch-action: none;
+}
+
+.hud {
+  align-items: center;
+  background: rgb(14 22 27 / 76%);
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 8px;
+  bottom: 18px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, auto) auto;
+  left: 18px;
+  max-width: calc(100vw - 36px);
+  padding: 12px;
+  position: fixed;
+  right: 18px;
+}
+
+.hud__stats,
+.hud__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hud__stats span {
+  background: rgb(255 255 255 / 9%);
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 6px;
+  min-width: 96px;
+  padding: 8px 10px;
+}
+
+.hud__status {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.hud__status strong,
+.hud__status span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud__status span {
+  color: rgb(244 247 240 / 72%);
+  font-size: 0.86rem;
+}
+
+.hud__actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 720px) {
+  .hud {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .hud__actions {
+    justify-content: stretch;
+  }
+
+  .hud__actions button {
+    flex: 1 1 120px;
+  }
 }
