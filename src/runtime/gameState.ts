@@ -1,5 +1,6 @@
 import type {
   Enemy,
+  EnemyArchetype,
   GameCommand,
   GameEvent,
   GameState,
@@ -12,8 +13,64 @@ import type {
 import { neonDistrictMap } from './districtMap';
 import type { MapRect } from './districtMap';
 
-const enemyContactCooldown = 0.75;
 const projectileRadius = 0.16;
+const enemyProjectileRadius = 0.2;
+const enemyAttackWindup = 0.34;
+
+const enemyArchetypes: Record<
+  EnemyArchetype,
+  {
+    radius: number;
+    health: number;
+    speed: number;
+    damage: number;
+    attackRange: number;
+    attackCooldown: number;
+    projectileSpeed: number;
+    desiredRange: number;
+  }
+> = {
+  rusher: {
+    radius: 0.42,
+    health: 52,
+    speed: 1.58,
+    damage: 9,
+    attackRange: 0.92,
+    attackCooldown: 0.82,
+    projectileSpeed: 0,
+    desiredRange: 0
+  },
+  shooter: {
+    radius: 0.38,
+    health: 44,
+    speed: 1.08,
+    damage: 7,
+    attackRange: 6.2,
+    attackCooldown: 1.45,
+    projectileSpeed: 5.2,
+    desiredRange: 4.5
+  },
+  tank: {
+    radius: 0.56,
+    health: 112,
+    speed: 0.78,
+    damage: 15,
+    attackRange: 1.05,
+    attackCooldown: 1.25,
+    projectileSpeed: 0,
+    desiredRange: 0
+  },
+  flanker: {
+    radius: 0.34,
+    health: 38,
+    speed: 2.05,
+    damage: 6,
+    attackRange: 0.82,
+    attackCooldown: 0.58,
+    projectileSpeed: 0,
+    desiredRange: 0
+  }
+};
 
 export const createGameState = (): GameState => ({
   status: 'menu',
@@ -49,7 +106,6 @@ export const createGameState = (): GameState => ({
   },
   map: neonDistrictMap,
   runSummary: createRunSummary(),
-  enemyContactCooldownRemaining: 0,
   events: [],
   nextEntityId: 1
 });
@@ -119,7 +175,6 @@ const resetRun = (state: GameState) => {
     spawned: false
   };
   getActiveWeapon(state).elapsedSinceShot = Infinity;
-  state.enemyContactCooldownRemaining = 0;
   transitionTo(state, 'waveCountdown');
 };
 
@@ -215,6 +270,7 @@ const firePrimary = (state: GameState, direction: Vector2) => {
   const projectile: Projectile = {
     id: nextId(state, 'projectile'),
     ownerId: state.player.id,
+    ownerKind: 'player',
     position: { ...state.player.position },
     velocity: {
       x: normalized.x * weapon.projectileSpeed,
@@ -234,24 +290,63 @@ const spawnWave = (state: GameState) => {
   state.wave.enemiesRemaining = enemyCount;
   state.wave.spawned = true;
   const spawnCount = state.map.enemySpawns.length;
+  const archetypes = archetypesForWave(state.wave.index);
 
   for (let index = 0; index < enemyCount; index += 1) {
     const spawn = state.map.enemySpawns[
       (index + state.wave.index - 1) % spawnCount
     ] ?? { x: 0, z: 0 };
-    const enemy: Enemy = {
-      id: nextId(state, 'enemy'),
-      position: { ...spawn },
-      radius: 0.42,
-      active: true,
-      health: 50 + state.wave.index * 12,
-      speed: 1.1 + state.wave.index * 0.08,
-      damage: 8
-    };
+    const archetype = archetypes[index % archetypes.length] ?? 'rusher';
+    const enemy = createEnemy(state, archetype, spawn, index);
     state.enemies.push(enemy);
+    emit(state, { type: 'enemySpawned', enemyId: enemy.id });
   }
 
   emit(state, { type: 'waveStarted', wave: state.wave.index });
+};
+
+const archetypesForWave = (waveIndex: number): EnemyArchetype[] => {
+  if (waveIndex === 1) {
+    return ['rusher', 'shooter', 'tank'];
+  }
+
+  if (waveIndex === 2) {
+    return ['rusher', 'shooter', 'flanker', 'tank'];
+  }
+
+  return ['rusher', 'shooter', 'tank', 'flanker'];
+};
+
+const createEnemy = (
+  state: GameState,
+  archetype: EnemyArchetype,
+  position: Vector2,
+  spawnIndex: number
+): Enemy => {
+  const template = enemyArchetypes[archetype];
+  const waveHealthBonus = state.wave.index * (archetype === 'tank' ? 16 : 9);
+  const speedBonus = Math.min(0.36, state.wave.index * 0.04);
+
+  return {
+    id: nextId(state, 'enemy'),
+    archetype,
+    position: { ...position },
+    radius: template.radius,
+    active: true,
+    health: template.health + waveHealthBonus,
+    maxHealth: template.health + waveHealthBonus,
+    speed: template.speed + speedBonus,
+    damage: template.damage + Math.floor(state.wave.index / 2),
+    attackRange: template.attackRange,
+    attackCooldown: template.attackCooldown,
+    attackCooldownRemaining: 0.35 + spawnIndex * 0.12,
+    windupRemaining: 0,
+    projectileSpeed: template.projectileSpeed,
+    desiredRange: template.desiredRange,
+    strafeDirection: spawnIndex % 2 === 0 ? 1 : -1,
+    pathDirection: null,
+    repathRemaining: 0
+  };
 };
 
 const updateProjectiles = (state: GameState, deltaSeconds: number) => {
@@ -270,25 +365,167 @@ const updateProjectiles = (state: GameState, deltaSeconds: number) => {
   }
 };
 
-const updateEnemies = (state: GameState, deltaSeconds: number) => {
-  state.enemyContactCooldownRemaining = Math.max(
-    0,
-    state.enemyContactCooldownRemaining - deltaSeconds
-  );
+const shouldStartEnemyAttack = (
+  state: GameState,
+  enemy: Enemy,
+  distanceToPlayer: number
+) =>
+  enemy.attackCooldownRemaining === 0 &&
+  distanceToPlayer <= enemy.attackRange &&
+  (enemy.archetype !== 'shooter' ||
+    hasLineOfSight(state.map.colliders, enemy.position, state.player.position));
 
+const performEnemyAttack = (
+  state: GameState,
+  enemy: Enemy,
+  direction: Vector2,
+  distanceToPlayer: number
+) => {
+  emit(state, { type: 'enemyAttacked', enemyId: enemy.id });
+
+  if (enemy.archetype === 'shooter') {
+    const projectile: Projectile = {
+      id: nextId(state, 'projectile'),
+      ownerId: enemy.id,
+      ownerKind: 'enemy',
+      position: { ...enemy.position },
+      velocity: {
+        x: direction.x * enemy.projectileSpeed,
+        z: direction.z * enemy.projectileSpeed
+      },
+      radius: enemyProjectileRadius,
+      active: true,
+      damage: enemy.damage,
+      ttl: 2.4
+    };
+    state.projectiles.push(projectile);
+    emit(state, { type: 'projectileFired', projectileId: projectile.id });
+    return;
+  }
+
+  if (distanceToPlayer <= enemy.attackRange + state.player.radius) {
+    damagePlayer(state, enemy.damage);
+  }
+};
+
+const enemyMovementDirection = (
+  state: GameState,
+  enemy: Enemy,
+  directToPlayer: Vector2
+): Vector2 | null => {
+  const distanceToPlayer = Math.hypot(
+    state.player.position.x - enemy.position.x,
+    state.player.position.z - enemy.position.z
+  );
+  let desired = directToPlayer;
+
+  if (enemy.archetype === 'shooter' && distanceToPlayer < enemy.desiredRange) {
+    desired = { x: -directToPlayer.x, z: -directToPlayer.z };
+  } else if (
+    enemy.archetype === 'shooter' &&
+    distanceToPlayer <= enemy.attackRange &&
+    hasLineOfSight(state.map.colliders, enemy.position, state.player.position)
+  ) {
+    desired = {
+      x: directToPlayer.z * enemy.strafeDirection,
+      z: -directToPlayer.x * enemy.strafeDirection
+    };
+  } else if (enemy.archetype === 'flanker' && distanceToPlayer > 1.4) {
+    desired = normalize({
+      x: directToPlayer.x + directToPlayer.z * enemy.strafeDirection * 0.82,
+      z: directToPlayer.z - directToPlayer.x * enemy.strafeDirection * 0.82
+    }) ?? directToPlayer;
+  }
+
+  if (enemy.repathRemaining > 0 && enemy.pathDirection) {
+    return enemy.pathDirection;
+  }
+
+  enemy.pathDirection = findNavigableDirection(state, enemy, desired);
+  enemy.repathRemaining = 0.22;
+  return enemy.pathDirection;
+};
+
+const findNavigableDirection = (
+  state: GameState,
+  enemy: Enemy,
+  desired: Vector2
+): Vector2 | null => {
+  const normalized = normalize(desired);
+  if (!normalized) {
+    return null;
+  }
+
+  const candidates = [
+    normalized,
+    rotateVector(normalized, Math.PI / 4),
+    rotateVector(normalized, -Math.PI / 4),
+    rotateVector(normalized, Math.PI / 2),
+    rotateVector(normalized, -Math.PI / 2),
+    { x: normalized.x, z: 0 },
+    { x: 0, z: normalized.z }
+  ];
+
+  for (const candidate of candidates) {
+    const direction = normalize(candidate);
+    if (!direction) {
+      continue;
+    }
+
+    const probe = {
+      x: enemy.position.x + direction.x * Math.max(enemy.radius * 1.25, 0.68),
+      z: enemy.position.z + direction.z * Math.max(enemy.radius * 1.25, 0.68)
+    };
+    if (canOccupy(state, probe, enemy.radius)) {
+      return direction;
+    }
+  }
+
+  return null;
+};
+
+const updateEnemies = (state: GameState, deltaSeconds: number) => {
   for (const enemy of state.enemies) {
-    const direction = normalize({
+    enemy.attackCooldownRemaining = Math.max(
+      0,
+      enemy.attackCooldownRemaining - deltaSeconds
+    );
+    enemy.repathRemaining = Math.max(0, enemy.repathRemaining - deltaSeconds);
+
+    const toPlayer = {
       x: state.player.position.x - enemy.position.x,
       z: state.player.position.z - enemy.position.z
-    });
+    };
+    const distanceToPlayer = Math.hypot(toPlayer.x, toPlayer.z);
+    const direction = normalize(toPlayer);
 
     if (!direction) {
       continue;
     }
 
+    if (enemy.windupRemaining > 0) {
+      enemy.windupRemaining = Math.max(0, enemy.windupRemaining - deltaSeconds);
+      if (enemy.windupRemaining === 0) {
+        performEnemyAttack(state, enemy, direction, distanceToPlayer);
+      }
+      continue;
+    }
+
+    if (shouldStartEnemyAttack(state, enemy, distanceToPlayer)) {
+      enemy.windupRemaining = enemyAttackWindup;
+      enemy.attackCooldownRemaining = enemy.attackCooldown;
+      emit(state, { type: 'enemyAttackWarning', enemyId: enemy.id });
+      continue;
+    }
+
+    const desiredDirection = enemyMovementDirection(state, enemy, direction);
+    if (!desiredDirection) {
+      continue;
+    }
+
     moveWithCollision(state, enemy, {
-      x: direction.x * enemy.speed * deltaSeconds,
-      z: direction.z * enemy.speed * deltaSeconds
+      x: desiredDirection.x * enemy.speed * deltaSeconds,
+      z: desiredDirection.z * enemy.speed * deltaSeconds
     });
   }
 };
@@ -296,6 +533,14 @@ const updateEnemies = (state: GameState, deltaSeconds: number) => {
 const resolveCombat = (state: GameState) => {
   for (const projectile of state.projectiles) {
     if (!projectile.active) {
+      continue;
+    }
+
+    if (projectile.ownerKind === 'enemy') {
+      if (overlaps(projectile, state.player)) {
+        projectile.active = false;
+        damagePlayer(state, projectile.damage);
+      }
       continue;
     }
 
@@ -309,31 +554,10 @@ const resolveCombat = (state: GameState) => {
 
     projectile.active = false;
     hitEnemy.health -= projectile.damage;
+    emit(state, { type: 'enemyDamaged', enemyId: hitEnemy.id });
 
     if (hitEnemy.health <= 0) {
-      hitEnemy.active = false;
-      state.runSummary.kills += 1;
-      state.wave.enemiesRemaining = Math.max(0, state.wave.enemiesRemaining - 1);
-      maybeDropPickup(state, hitEnemy.position);
-      emit(state, { type: 'enemyDefeated', enemyId: hitEnemy.id });
-    }
-  }
-
-  const touchingEnemy = state.enemies.find(
-    (enemy) => enemy.active && overlaps(state.player, enemy)
-  );
-
-  if (touchingEnemy && state.enemyContactCooldownRemaining === 0) {
-    state.enemyContactCooldownRemaining = enemyContactCooldown;
-    state.player.health = Math.max(0, state.player.health - touchingEnemy.damage);
-    emit(state, {
-      type: 'playerDamaged',
-      amount: touchingEnemy.damage,
-      health: state.player.health
-    });
-
-    if (state.player.health === 0) {
-      endRun(state);
+      defeatEnemy(state, hitEnemy);
     }
   }
 
@@ -342,6 +566,27 @@ const resolveCombat = (state: GameState) => {
       collectPickup(state, pickup.id);
     }
   }
+};
+
+const damagePlayer = (state: GameState, amount: number) => {
+  state.player.health = Math.max(0, state.player.health - amount);
+  emit(state, {
+    type: 'playerDamaged',
+    amount,
+    health: state.player.health
+  });
+
+  if (state.player.health === 0) {
+    endRun(state);
+  }
+};
+
+const defeatEnemy = (state: GameState, enemy: Enemy) => {
+  enemy.active = false;
+  state.runSummary.kills += 1;
+  state.wave.enemiesRemaining = Math.max(0, state.wave.enemiesRemaining - 1);
+  maybeDropPickup(state, enemy.position);
+  emit(state, { type: 'enemyDefeated', enemyId: enemy.id });
 };
 
 const collectPickup = (state: GameState, pickupId: string) => {
@@ -478,6 +723,25 @@ const circleOverlapsRect = (position: Vector2, radius: number, rect: MapRect) =>
   return distanceSquared(position, { x: closestX, z: closestZ }) <= radius ** 2;
 };
 
+const hasLineOfSight = (colliders: MapRect[], from: Vector2, to: Vector2) => {
+  const distance = Math.hypot(to.x - from.x, to.z - from.z);
+  const steps = Math.max(2, Math.ceil(distance / 0.35));
+
+  for (let step = 1; step < steps; step += 1) {
+    const alpha = step / steps;
+    const point = {
+      x: from.x + (to.x - from.x) * alpha,
+      z: from.z + (to.z - from.z) * alpha
+    };
+
+    if (collidesWithMap(colliders, point, 0.08)) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
 const nearestLootSpawn = (state: GameState, position: Vector2) =>
   state.map.lootSpawns.reduce((nearest, spawn) =>
     distanceSquared(position, spawn) < distanceSquared(position, nearest)
@@ -495,6 +759,15 @@ const distanceSquared = (a: Vector2, b: Vector2) =>
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
+
+const rotateVector = (vector: Vector2, radians: number): Vector2 => {
+  const sin = Math.sin(radians);
+  const cos = Math.cos(radians);
+  return {
+    x: vector.x * cos - vector.z * sin,
+    z: vector.x * sin + vector.z * cos
+  };
+};
 
 const normalize = (vector: Vector2): Vector2 | null => {
   const length = Math.hypot(vector.x, vector.z);

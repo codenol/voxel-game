@@ -27,14 +27,28 @@ export interface Player extends EntityBase {
   weaponId: string;
 }
 
+export type EnemyArchetype = 'rusher' | 'shooter' | 'tank' | 'flanker';
+
 export interface Enemy extends EntityBase {
+  archetype: EnemyArchetype;
   health: number;
+  maxHealth: number;
   speed: number;
   damage: number;
+  attackRange: number;
+  attackCooldown: number;
+  attackCooldownRemaining: number;
+  windupRemaining: number;
+  projectileSpeed: number;
+  desiredRange: number;
+  strafeDirection: 1 | -1;
+  pathDirection: Vector2 | null;
+  repathRemaining: number;
 }
 
 export interface Projectile extends EntityBase {
   ownerId: string;
+  ownerKind: 'player' | 'enemy';
   velocity: Vector2;
   damage: number;
   ttl: number;
@@ -84,6 +98,10 @@ export type GameEvent =
   | { type: 'waveStarted'; wave: number }
   | { type: 'waveCleared'; wave: number }
   | { type: 'projectileFired'; projectileId: string }
+  | { type: 'enemySpawned'; enemyId: string }
+  | { type: 'enemyDamaged'; enemyId: string }
+  | { type: 'enemyAttackWarning'; enemyId: string }
+  | { type: 'enemyAttacked'; enemyId: string }
   | { type: 'enemyDefeated'; enemyId: string }
   | { type: 'pickupCollected'; pickupId: string; kind: Pickup['kind'] }
   | { type: 'playerDamaged'; amount: number; health: number }
@@ -100,7 +118,6 @@ export interface GameState {
   wave: Wave;
   map: DistrictMap;
   runSummary: RunSummary;
-  enemyContactCooldownRemaining: number;
   events: GameEvent[];
   nextEntityId: number;
 }

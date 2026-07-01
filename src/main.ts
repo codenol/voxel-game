@@ -57,7 +57,9 @@ let touchFireActive = false;
 let renderClock = 0;
 let playerDamageFlashUntil = 0;
 let pickupPulseUntil = 0;
+const enemySpawnFlashUntil = new Map<string, number>();
 const enemyHitFlashUntil = new Map<string, number>();
+const enemyAttackFlashUntil = new Map<string, number>();
 const projectileSpawnFlashUntil = new Map<string, number>();
 const pickupCollectBursts: THREE.Object3D[] = [];
 const pressedKeys = new Set<string>();
@@ -133,15 +135,40 @@ const enemyMaterial = new THREE.MeshStandardMaterial({
   emissive: 0x2a0707,
   roughness: 0.72
 });
+const enemyShooterMaterial = new THREE.MeshStandardMaterial({
+  color: 0xb477ff,
+  emissive: 0x211039,
+  roughness: 0.66
+});
+const enemyTankMaterial = new THREE.MeshStandardMaterial({
+  color: 0xf08a4b,
+  emissive: 0x351307,
+  roughness: 0.8
+});
+const enemyFlankerMaterial = new THREE.MeshStandardMaterial({
+  color: 0x4ee0b0,
+  emissive: 0x08332a,
+  roughness: 0.58
+});
 const enemyHitMaterial = new THREE.MeshStandardMaterial({
   color: 0xffffff,
   emissive: 0xff5b2e,
   roughness: 0.5
 });
+const enemyAttackMaterial = new THREE.MeshStandardMaterial({
+  color: 0xfff2a8,
+  emissive: 0xff6f00,
+  roughness: 0.42
+});
 const projectileMaterial = new THREE.MeshStandardMaterial({
   color: 0xfff08a,
   emissive: 0x665500,
   roughness: 0.45
+});
+const enemyProjectileMaterial = new THREE.MeshStandardMaterial({
+  color: 0xff73a6,
+  emissive: 0x7a1032,
+  roughness: 0.42
 });
 const pickupMaterial = new THREE.MeshStandardMaterial({
   color: 0x58d68d,
@@ -348,33 +375,108 @@ function syncMeshes<T extends Enemy | Projectile | Pickup, TObject extends THREE
   }
 }
 
-function createEnemyMesh() {
+function createEnemyMesh(enemy: Enemy) {
   const group = new THREE.Group();
-  const body = new THREE.Mesh(cubeGeometry.clone(), enemyMaterial);
-  body.scale.set(0.72, 0.72, 0.72);
+  const material = enemyMaterialFor(enemy);
+  const body = new THREE.Mesh(cubeGeometry.clone(), material);
+  body.scale.copy(enemyBodyScale(enemy));
   body.castShadow = true;
   body.receiveShadow = true;
 
-  const head = new THREE.Mesh(cubeGeometry.clone(), enemyMaterial);
+  const head = new THREE.Mesh(cubeGeometry.clone(), material);
   head.position.set(0, 0.54, -0.08);
-  head.scale.set(0.42, 0.28, 0.42);
+  head.scale.set(
+    enemy.archetype === 'tank' ? 0.5 : 0.42,
+    enemy.archetype === 'flanker' ? 0.2 : 0.28,
+    enemy.archetype === 'shooter' ? 0.56 : 0.42
+  );
   head.castShadow = true;
   head.receiveShadow = true;
 
+  group.userData.baseMaterial = material;
   group.add(body, head);
+
+  if (enemy.archetype === 'shooter') {
+    const barrel = new THREE.Mesh(cubeGeometry.clone(), material);
+    barrel.position.set(0, 0.35, 0.52);
+    barrel.scale.set(0.18, 0.16, 0.56);
+    barrel.castShadow = true;
+    group.add(barrel);
+  }
+
+  if (enemy.archetype === 'tank') {
+    const armor = new THREE.Mesh(cubeGeometry.clone(), material);
+    armor.position.set(0, 0.12, 0);
+    armor.scale.set(0.96, 0.24, 0.96);
+    armor.castShadow = true;
+    armor.receiveShadow = true;
+    group.add(armor);
+  }
+
+  if (enemy.archetype === 'flanker') {
+    const fin = new THREE.Mesh(cubeGeometry.clone(), material);
+    fin.position.set(0, 0.42, -0.42);
+    fin.scale.set(0.18, 0.3, 0.45);
+    fin.castShadow = true;
+    group.add(fin);
+  }
+
   return group;
 }
 
 function updateEnemyMesh(enemy: Enemy, mesh: THREE.Group) {
   const hitUntil = enemyHitFlashUntil.get(enemy.id) ?? 0;
+  const spawnUntil = enemySpawnFlashUntil.get(enemy.id) ?? 0;
+  const attackUntil = enemyAttackFlashUntil.get(enemy.id) ?? 0;
+  const baseMaterial = mesh.userData.baseMaterial as THREE.MeshStandardMaterial;
   mesh.position.set(enemy.position.x, 0.36, enemy.position.z);
-  mesh.rotation.y += 0.025;
-  mesh.scale.setScalar(renderClock < hitUntil ? 1.16 : 1);
+  if (enemy.pathDirection) {
+    mesh.rotation.y = Math.atan2(enemy.pathDirection.x, enemy.pathDirection.z);
+  } else {
+    mesh.rotation.y += 0.025;
+  }
+
+  const spawnScale =
+    renderClock < spawnUntil ? 1 - (spawnUntil - renderClock) / 0.32 : 1;
+  const hitScale = renderClock < hitUntil ? 1.16 : 1;
+  const attackScale = renderClock < attackUntil ? 1.12 : 1;
+  mesh.scale.setScalar(Math.max(0.2, spawnScale) * hitScale * attackScale);
   mesh.children.forEach((child) => {
     if (child instanceof THREE.Mesh) {
-      child.material = renderClock < hitUntil ? enemyHitMaterial : enemyMaterial;
+      child.material =
+        renderClock < hitUntil
+          ? enemyHitMaterial
+          : renderClock < attackUntil
+            ? enemyAttackMaterial
+            : baseMaterial;
     }
   });
+}
+
+function enemyMaterialFor(enemy: Enemy) {
+  switch (enemy.archetype) {
+    case 'shooter':
+      return enemyShooterMaterial;
+    case 'tank':
+      return enemyTankMaterial;
+    case 'flanker':
+      return enemyFlankerMaterial;
+    case 'rusher':
+      return enemyMaterial;
+  }
+}
+
+function enemyBodyScale(enemy: Enemy) {
+  switch (enemy.archetype) {
+    case 'shooter':
+      return new THREE.Vector3(0.62, 0.68, 0.84);
+    case 'tank':
+      return new THREE.Vector3(1, 0.86, 1);
+    case 'flanker':
+      return new THREE.Vector3(0.52, 0.58, 0.72);
+    case 'rusher':
+      return new THREE.Vector3(0.72, 0.72, 0.72);
+  }
 }
 
 function createProjectileMesh() {
@@ -392,6 +494,17 @@ function updateProjectileMesh(projectile: Projectile, mesh: THREE.Group) {
   mesh.position.set(projectile.position.x, 0.5, projectile.position.z);
   mesh.rotation.y = Math.atan2(projectile.velocity.x, projectile.velocity.z);
   mesh.scale.setScalar(renderClock < spawnUntil ? 1.5 : 1);
+  mesh.children.forEach((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.material =
+        projectile.ownerKind === 'enemy'
+          ? enemyProjectileMaterial
+          : projectileMaterial;
+    }
+    if (child instanceof THREE.PointLight) {
+      child.color.set(projectile.ownerKind === 'enemy' ? 0xff73a6 : 0xffe66b);
+    }
+  });
 }
 
 function createPickupMesh() {
@@ -558,8 +671,25 @@ function processRenderEvents(events: GameEvent[]) {
         const projectile = state.projectiles.find(
           (candidate) => candidate.id === event.projectileId
         );
-        if (projectile) {
+        if (projectile?.ownerKind === 'player') {
           aimDirection = normalize2(projectile.velocity) ?? aimDirection;
+        }
+        break;
+      }
+      case 'enemySpawned':
+        enemySpawnFlashUntil.set(event.enemyId, renderClock + 0.32);
+        break;
+      case 'enemyDamaged':
+        enemyHitFlashUntil.set(event.enemyId, renderClock + 0.12);
+        break;
+      case 'enemyAttackWarning':
+        enemyAttackFlashUntil.set(event.enemyId, renderClock + 0.34);
+        break;
+      case 'enemyAttacked': {
+        enemyAttackFlashUntil.set(event.enemyId, renderClock + 0.14);
+        const mesh = enemyMeshes.get(event.enemyId);
+        if (mesh) {
+          createAttackBurst(mesh.position);
         }
         break;
       }
@@ -567,7 +697,7 @@ function processRenderEvents(events: GameEvent[]) {
         enemyHitFlashUntil.set(event.enemyId, renderClock + 0.16);
         const mesh = enemyMeshes.get(event.enemyId);
         if (mesh) {
-          createPickupBurst(mesh.position);
+          createDeathBurst(mesh.position);
         }
         break;
       }
@@ -643,7 +773,36 @@ function createPickupBurst(position: THREE.Vector3) {
   burst.position.y += 0.35;
   burst.scale.set(0.18, 0.18, 0.18);
   burst.userData.expiresAt = renderClock + 0.32;
+  burst.userData.duration = 0.32;
   burst.castShadow = false;
+  pickupCollectBursts.push(burst);
+  scene.add(burst);
+}
+
+function createAttackBurst(position: THREE.Vector3) {
+  const material = burstMaterial.clone();
+  material.color.set(0xff7a2f);
+  material.emissive.set(0xff2f00);
+  const burst = new THREE.Mesh(cubeGeometry.clone(), material);
+  burst.position.copy(position);
+  burst.position.y += 0.25;
+  burst.scale.set(0.16, 0.08, 0.16);
+  burst.userData.expiresAt = renderClock + 0.2;
+  burst.userData.duration = 0.2;
+  pickupCollectBursts.push(burst);
+  scene.add(burst);
+}
+
+function createDeathBurst(position: THREE.Vector3) {
+  const material = burstMaterial.clone();
+  material.color.set(0xffffff);
+  material.emissive.set(0xff5b2e);
+  const burst = new THREE.Mesh(cubeGeometry.clone(), material);
+  burst.position.copy(position);
+  burst.position.y += 0.42;
+  burst.scale.set(0.24, 0.24, 0.24);
+  burst.userData.expiresAt = renderClock + 0.38;
+  burst.userData.duration = 0.38;
   pickupCollectBursts.push(burst);
   scene.add(burst);
 }
@@ -663,11 +822,12 @@ function updatePickupBursts() {
       continue;
     }
 
-    const progress = 1 - remaining / 0.32;
+    const duration = Number(burst.userData.duration) || 0.32;
+    const progress = 1 - remaining / duration;
     burst.scale.setScalar(0.18 + progress * 1.8);
     burst.rotation.y += 0.08;
     if (burst instanceof THREE.Mesh && burst.material instanceof THREE.MeshStandardMaterial) {
-      burst.material.opacity = Math.max(0, remaining / 0.32);
+      burst.material.opacity = Math.max(0, remaining / duration);
     }
   }
 }
