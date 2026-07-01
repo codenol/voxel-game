@@ -18,21 +18,48 @@ const hud = document.querySelector<HTMLElement>('#hud');
 const primaryAction = document.querySelector<HTMLButtonElement>('#primary-action');
 const pauseAction = document.querySelector<HTMLButtonElement>('#pause-action');
 const healthLabel = document.querySelector<HTMLElement>('#health-label');
+const weaponLabel = document.querySelector<HTMLElement>('#weapon-label');
+const ammoLabel = document.querySelector<HTMLElement>('#ammo-label');
 const waveLabel = document.querySelector<HTMLElement>('#wave-label');
+const countdownLabel = document.querySelector<HTMLElement>('#countdown-label');
 const enemiesLabel = document.querySelector<HTMLElement>('#enemies-label');
+const scoreLabel = document.querySelector<HTMLElement>('#score-label');
+const killsLabel = document.querySelector<HTMLElement>('#kills-label');
 const statusLabel = document.querySelector<HTMLElement>('#status-label');
 const summaryLabel = document.querySelector<HTMLElement>('#summary-label');
+const menuPanel = document.querySelector<HTMLElement>('#menu-panel');
+const menuKicker = document.querySelector<HTMLElement>('#menu-kicker');
+const menuTitle = document.querySelector<HTMLElement>('#menu-title');
+const menuCopy = document.querySelector<HTMLElement>('#menu-copy');
+const runStats = document.querySelector<HTMLElement>('#run-stats');
+const menuPrimaryAction = document.querySelector<HTMLButtonElement>(
+  '#menu-primary-action'
+);
+const menuSecondaryAction = document.querySelector<HTMLButtonElement>(
+  '#menu-secondary-action'
+);
 const touchControls = document.querySelector<HTMLElement>('#touch-controls');
 const moveStickThumb = document.querySelector<HTMLElement>('#move-stick-thumb');
 const aimStickThumb = document.querySelector<HTMLElement>('#aim-stick-thumb');
 
-if (!canvas || !hud || !primaryAction || !pauseAction) {
+if (
+  !canvas ||
+  !hud ||
+  !primaryAction ||
+  !pauseAction ||
+  !menuPanel ||
+  !menuPrimaryAction ||
+  !menuSecondaryAction
+) {
   throw new Error('Game UI was not found.');
 }
 
 const gameHud = hud;
 const primaryButton = primaryAction;
 const pauseButton = pauseAction;
+const menuOverlay = menuPanel;
+const menuPrimaryButton = menuPrimaryAction;
+const menuSecondaryButton = menuSecondaryAction;
 const touchControlsLayer = touchControls;
 const moveThumb = moveStickThumb;
 const aimThumb = aimStickThumb;
@@ -210,21 +237,19 @@ const queueCommand = (command: GameCommand) => {
 };
 
 primaryButton.addEventListener('click', () => {
-  if (state.status === 'menu') {
-    queueCommand({ type: 'startRun' });
-    return;
-  }
-
-  if (state.status === 'gameOver') {
-    queueCommand({ type: 'restartRun' });
-    return;
-  }
-
-  queueCommand({ type: 'firePrimary', direction: aimDirection });
+  handlePrimaryAction();
 });
 
 pauseButton.addEventListener('click', () => {
-  queueCommand({ type: state.status === 'paused' ? 'resume' : 'pause' });
+  handlePauseAction();
+});
+
+menuPrimaryButton.addEventListener('click', () => {
+  handleMenuPrimaryAction();
+});
+
+menuSecondaryButton.addEventListener('click', () => {
+  handlePauseAction();
 });
 
 window.addEventListener('keydown', (event) => {
@@ -235,11 +260,15 @@ window.addEventListener('keydown', (event) => {
 
   if (event.key === ' ') {
     event.preventDefault();
-    queueCommand({ type: 'firePrimary', direction: aimDirection });
+    if (state.status === 'menu' || state.status === 'gameOver') {
+      handlePrimaryAction();
+    } else {
+      queueCommand({ type: 'firePrimary', direction: aimDirection });
+    }
   }
 
   if (event.key.toLowerCase() === 'p') {
-    queueCommand({ type: state.status === 'paused' ? 'resume' : 'pause' });
+    handlePauseAction();
   }
 
   if (event.key.toLowerCase() === 'r') {
@@ -1043,16 +1072,51 @@ function updateHud(gameState: GameState) {
     gameState.status !== 'waveCountdown' &&
     gameState.status !== 'paused';
 
-  setText(healthLabel, `Health ${Math.ceil(gameState.player.health)}`);
+  const activeWeapon = gameState.weapons[gameState.player.weaponId];
+  const health = Math.ceil(gameState.player.health);
+  const maxHealth = Math.ceil(gameState.player.maxHealth);
+  const score = calculateScore(gameState);
+  setText(healthLabel, `Health ${health}/${maxHealth}`);
+  setText(weaponLabel, activeWeapon?.name ?? 'Unknown');
+  setText(ammoLabel, 'Ammo ∞');
   setText(waveLabel, `Wave ${gameState.wave.index || '-'}`);
+  setText(countdownLabel, countdownText(gameState));
   setText(
     enemiesLabel,
-    `Enemies ${gameState.wave.totalEnemies - gameState.wave.enemiesRemaining}/${
-      gameState.wave.totalEnemies || 0
-    }`
+    `Enemies ${defeatedInWave(gameState)}/${gameState.wave.totalEnemies || 0}`
   );
+  setText(scoreLabel, `Score ${score}`);
+  setText(killsLabel, `Kills ${gameState.runSummary.kills}`);
   setText(statusLabel, statusText(gameState));
   setText(summaryLabel, summaryText(gameState));
+  updateMenuPanel(gameState);
+}
+
+function handlePrimaryAction() {
+  if (state.status === 'menu') {
+    queueCommand({ type: 'startRun' });
+    return;
+  }
+
+  if (state.status === 'gameOver') {
+    queueCommand({ type: 'restartRun' });
+    return;
+  }
+
+  queueCommand({ type: 'firePrimary', direction: aimDirection });
+}
+
+function handlePauseAction() {
+  queueCommand({ type: state.status === 'paused' ? 'resume' : 'pause' });
+}
+
+function handleMenuPrimaryAction() {
+  if (state.status === 'paused') {
+    queueCommand({ type: 'restartRun' });
+    return;
+  }
+
+  handlePrimaryAction();
 }
 
 function primaryActionLabel(gameState: GameState) {
@@ -1079,7 +1143,7 @@ function statusText(gameState: GameState) {
     case 'paused':
       return 'Paused';
     case 'gameOver':
-      return `Game over after ${Math.floor(gameState.runSummary.elapsed)}s`;
+      return `Game over after ${formatDuration(gameState.runSummary.elapsed)}`;
     case 'loading':
       return 'Loading';
   }
@@ -1088,17 +1152,18 @@ function statusText(gameState: GameState) {
 function summaryText(gameState: GameState) {
   const weapon = gameState.weapons[gameState.player.weaponId]?.name ?? 'Unknown';
   if (gameState.status !== 'gameOver') {
-    return `Kills ${gameState.runSummary.kills} | ${weapon} | Damage ${Math.round(
+    return `${weapon} | ${formatDuration(gameState.runSummary.elapsed)} | Damage ${Math.round(
       gameState.runSummary.damageDealt
-    )}`;
+    )} | Taken ${Math.round(gameState.runSummary.damageTaken)}`;
   }
 
   return [
     `Reached wave ${gameState.runSummary.waveReached}`,
     `Kills ${gameState.runSummary.kills}`,
+    `Duration ${formatDuration(gameState.runSummary.elapsed)}`,
     `Dealt ${Math.round(gameState.runSummary.damageDealt)}`,
     `Taken ${Math.round(gameState.runSummary.damageTaken)}`,
-    `Weapons ${formatWeaponsUsed(gameState.runSummary.weaponsUsed)}`
+    `Primary ${formatPrimaryWeapon(gameState.runSummary.weaponsUsed)}`
   ].join(' | ');
 }
 
@@ -1109,6 +1174,140 @@ function formatWeaponsUsed(weaponsUsed: Record<string, number>) {
   }
 
   return entries.map(([name, shots]) => `${name} ${shots}`).join(', ');
+}
+
+function formatPrimaryWeapon(weaponsUsed: Record<string, number>) {
+  const [name, shots] =
+    Object.entries(weaponsUsed).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (!name || shots === undefined) {
+    return 'none';
+  }
+
+  return `${name} (${shots} shots)`;
+}
+
+function updateMenuPanel(gameState: GameState) {
+  const isVisible =
+    gameState.status === 'menu' ||
+    gameState.status === 'paused' ||
+    gameState.status === 'gameOver';
+  menuOverlay.hidden = !isVisible;
+  menuOverlay.dataset.status = gameState.status;
+
+  if (!isVisible) {
+    return;
+  }
+
+  setText(menuKicker, menuKickerText(gameState));
+  setText(menuTitle, menuTitleText(gameState));
+  setText(menuCopy, menuCopyText(gameState));
+  menuPrimaryButton.textContent = menuPrimaryActionLabel(gameState);
+  menuSecondaryButton.hidden = gameState.status !== 'paused';
+
+  if (gameState.status === 'gameOver') {
+    renderRunStats(gameState);
+  } else if (runStats) {
+    runStats.hidden = true;
+    runStats.replaceChildren();
+  }
+}
+
+function menuKickerText(gameState: GameState) {
+  switch (gameState.status) {
+    case 'paused':
+      return 'Paused';
+    case 'gameOver':
+      return 'Run Summary';
+    default:
+      return 'Voxel Survival';
+  }
+}
+
+function menuTitleText(gameState: GameState) {
+  switch (gameState.status) {
+    case 'paused':
+      return 'Game Paused';
+    case 'gameOver':
+      return 'Game Over';
+    default:
+      return 'Ready';
+  }
+}
+
+function menuCopyText(gameState: GameState) {
+  switch (gameState.status) {
+    case 'paused':
+      return 'Resume the current run or restart from wave one.';
+    case 'gameOver':
+      return `Score ${calculateScore(gameState)} from ${gameState.runSummary.kills} kills.`;
+    default:
+      return 'Clear waves, collect drops, and stay alive.';
+  }
+}
+
+function menuPrimaryActionLabel(gameState: GameState) {
+  switch (gameState.status) {
+    case 'paused':
+      return 'Restart';
+    case 'gameOver':
+      return 'Restart Run';
+    default:
+      return 'Start Run';
+  }
+}
+
+function renderRunStats(gameState: GameState) {
+  if (!runStats) {
+    return;
+  }
+
+  const stats: Array<[string, string]> = [
+    ['Wave reached', String(gameState.runSummary.waveReached)],
+    ['Kills', String(gameState.runSummary.kills)],
+    ['Duration', formatDuration(gameState.runSummary.elapsed)],
+    ['Primary weapon', formatPrimaryWeapon(gameState.runSummary.weaponsUsed)],
+    ['Weapon shots', formatWeaponsUsed(gameState.runSummary.weaponsUsed)],
+    ['Damage dealt', String(Math.round(gameState.runSummary.damageDealt))],
+    ['Damage taken', String(Math.round(gameState.runSummary.damageTaken))]
+  ];
+
+  runStats.replaceChildren(
+    ...stats.flatMap(([label, value]) => {
+      const term = document.createElement('dt');
+      const description = document.createElement('dd');
+      term.textContent = label;
+      description.textContent = value;
+      return [term, description];
+    })
+  );
+  runStats.hidden = false;
+}
+
+function countdownText(gameState: GameState) {
+  if (gameState.status !== 'waveCountdown') {
+    return 'Next --';
+  }
+
+  return `Next ${Math.ceil(gameState.wave.countdown)}s`;
+}
+
+function defeatedInWave(gameState: GameState) {
+  return Math.max(0, gameState.wave.totalEnemies - gameState.wave.enemiesRemaining);
+}
+
+function calculateScore(gameState: GameState) {
+  return (
+    gameState.runSummary.kills * 100 +
+    gameState.runSummary.wavesCleared * 500 +
+    Math.round(gameState.runSummary.damageDealt)
+  );
+}
+
+function formatDuration(seconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
 }
 
 function setText(element: HTMLElement | null, text: string) {
