@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title>Voxel Game icon</title>
+  <rect width="512" height="512" rx="96" fill="#162028"/>
+  <path d="M256 70 408 158v176L256 422 104 334V158Z" fill="#89c765"/>
+  <path d="M256 70 408 158 256 246 104 158Z" fill="#b4d97f"/>
+  <path d="M256 246 408 158v176L256 422Z" fill="#5f8f57"/>
+  <path d="M104 158 256 246v176L104 334Z" fill="#3d6d4a"/>
+  <path d="M256 149 324 188l-68 39-68-39Z" fill="#f1d778"/>
+</svg>
