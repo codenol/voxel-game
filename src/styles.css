@@ -49,6 +49,58 @@ button:disabled {
   touch-action: none;
 }
 
+.touch-controls {
+  display: none;
+}
+
+.touch-stick {
+  --stick-size: 112px;
+  --thumb-size: 46px;
+  align-items: center;
+  background: rgb(9 15 18 / 44%);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 50%;
+  bottom: 104px;
+  display: flex;
+  height: var(--stick-size);
+  justify-content: center;
+  pointer-events: auto;
+  position: fixed;
+  touch-action: none;
+  width: var(--stick-size);
+}
+
+.touch-stick::before {
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 50%;
+  content: "";
+  height: 54%;
+  position: absolute;
+  width: 54%;
+}
+
+.touch-stick__thumb {
+  background: rgb(244 247 240 / 86%);
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 50%;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+  height: var(--thumb-size);
+  transform: translate3d(0, 0, 0);
+  width: var(--thumb-size);
+}
+
+.touch-stick--move {
+  left: 24px;
+}
+
+.touch-stick--aim {
+  right: 24px;
+}
+
+.touch-stick--aim .touch-stick__thumb {
+  background: rgb(255 225 118 / 90%);
+}
+
 .hud {
   align-items: center;
   background: rgb(14 22 27 / 76%);
@@ -102,9 +154,20 @@ button:disabled {
   justify-content: flex-end;
 }
 
+@media (pointer: coarse) {
+  .touch-controls {
+    display: block;
+  }
+
+  .hud {
+    bottom: 12px;
+  }
+}
+
 @media (max-width: 720px) {
   .hud {
     align-items: stretch;
+    bottom: 10px;
     grid-template-columns: 1fr;
   }
 
@@ -114,5 +177,21 @@ button:disabled {
 
   .hud__actions button {
     flex: 1 1 120px;
+  }
+}
+
+@media (max-width: 520px) and (pointer: coarse) {
+  .touch-stick {
+    --stick-size: 96px;
+    --thumb-size: 40px;
+    bottom: 170px;
+  }
+
+  .touch-stick--move {
+    left: 14px;
+  }
+
+  .touch-stick--aim {
+    right: 14px;
   }
 }

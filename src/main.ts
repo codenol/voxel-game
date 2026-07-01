@@ -10,6 +10,7 @@ import type {
   Projectile,
   Vector2
 } from './runtime/types';
+import type { MapProp, MapRect } from './runtime/districtMap';
 import './styles.css';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas');
@@ -21,6 +22,9 @@ const waveLabel = document.querySelector<HTMLElement>('#wave-label');
 const enemiesLabel = document.querySelector<HTMLElement>('#enemies-label');
 const statusLabel = document.querySelector<HTMLElement>('#status-label');
 const summaryLabel = document.querySelector<HTMLElement>('#summary-label');
+const touchControls = document.querySelector<HTMLElement>('#touch-controls');
+const moveStickThumb = document.querySelector<HTMLElement>('#move-stick-thumb');
+const aimStickThumb = document.querySelector<HTMLElement>('#aim-stick-thumb');
 
 if (!canvas || !hud || !primaryAction || !pauseAction) {
   throw new Error('Game UI was not found.');
@@ -29,6 +33,9 @@ if (!canvas || !hud || !primaryAction || !pauseAction) {
 const gameHud = hud;
 const primaryButton = primaryAction;
 const pauseButton = pauseAction;
+const touchControlsLayer = touchControls;
+const moveThumb = moveStickThumb;
+const aimThumb = aimStickThumb;
 const state = createGameState();
 const commandQueue: GameCommand[] = [];
 const arenaSize = 18;
@@ -39,13 +46,25 @@ const desiredCameraPosition = new THREE.Vector3();
 const cameraLookTarget = new THREE.Vector3();
 const smoothedCameraTarget = new THREE.Vector3(0, 0.8, 0);
 const smoothedCameraPosition = new THREE.Vector3(7, 7.5, 8);
-let lastFacingDirection: Vector2 = { ...defaultFacing };
+const fixedCameraOffset = new THREE.Vector3(7, 7.5, 8);
+let aimDirection: Vector2 = { ...defaultFacing };
+let keyboardMovementDirection: Vector2 | null = null;
+let touchMovementDirection: Vector2 | null = null;
+let touchAimDirection: Vector2 | null = null;
+let mouseAimActive = false;
+let pointerFireActive = false;
+let touchFireActive = false;
 let renderClock = 0;
 let playerDamageFlashUntil = 0;
 let pickupPulseUntil = 0;
 const enemyHitFlashUntil = new Map<string, number>();
 const projectileSpawnFlashUntil = new Map<string, number>();
 const pickupCollectBursts: THREE.Object3D[] = [];
+const pressedKeys = new Set<string>();
+const pointerNdc = new THREE.Vector2();
+const aimRaycaster = new THREE.Raycaster();
+const aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const aimIntersection = new THREE.Vector3();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x172226);
@@ -129,18 +148,6 @@ const pickupMaterial = new THREE.MeshStandardMaterial({
   emissive: 0x0d4f28,
   roughness: 0.5
 });
-const coverMaterial = new THREE.MeshStandardMaterial({
-  color: 0x7a825a,
-  roughness: 0.82
-});
-const buildingMaterial = new THREE.MeshStandardMaterial({
-  color: 0x6d8190,
-  roughness: 0.78
-});
-const roofMaterial = new THREE.MeshStandardMaterial({
-  color: 0xa4a162,
-  roughness: 0.84
-});
 const burstMaterial = new THREE.MeshStandardMaterial({
   color: 0xfff0a6,
   emissive: 0xffb400,
@@ -181,7 +188,7 @@ primaryButton.addEventListener('click', () => {
     return;
   }
 
-  queueCommand({ type: 'firePrimary', direction: { x: 1, z: 0 } });
+  queueCommand({ type: 'firePrimary', direction: aimDirection });
 });
 
 pauseButton.addEventListener('click', () => {
@@ -189,9 +196,14 @@ pauseButton.addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', (event) => {
+  if (isMovementKey(event.key)) {
+    pressedKeys.add(event.key.toLowerCase());
+    event.preventDefault();
+  }
+
   if (event.key === ' ') {
     event.preventDefault();
-    queueCommand({ type: 'firePrimary', direction: { x: 1, z: 0 } });
+    queueCommand({ type: 'firePrimary', direction: aimDirection });
   }
 
   if (event.key.toLowerCase() === 'p') {
@@ -203,12 +215,69 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
+window.addEventListener('keyup', (event) => {
+  if (isMovementKey(event.key)) {
+    pressedKeys.delete(event.key.toLowerCase());
+    event.preventDefault();
+  }
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (event.pointerType === 'mouse') {
+    updateAimFromPointer(event);
+  }
+});
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.pointerType !== 'mouse' || event.button !== 0) {
+    return;
+  }
+
+  updateAimFromPointer(event);
+  pointerFireActive = true;
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+canvas.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'mouse' && event.button === 0) {
+    pointerFireActive = false;
+    releasePointerCapture(canvas, event.pointerId);
+  }
+});
+
+canvas.addEventListener('pointercancel', (event) => {
+  if (event.pointerType === 'mouse') {
+    pointerFireActive = false;
+    releasePointerCapture(canvas, event.pointerId);
+  }
+});
+
+bindTouchStick('move', touchControlsLayer, moveThumb, (direction) => {
+  touchMovementDirection = direction;
+});
+bindTouchStick('aim', touchControlsLayer, aimThumb, (direction) => {
+  touchAimDirection = direction;
+  touchFireActive = Boolean(direction);
+  if (direction) {
+    aimDirection = direction;
+  }
+});
+
 window.addEventListener('resize', resize);
 resize();
 
 const loop = new GameLoop({
   update: (deltaSeconds) => {
     const commands = commandQueue.splice(0);
+    const movementDirection = readMovementDirection();
+    if (movementDirection) {
+      commands.push({ type: 'movePlayer', direction: movementDirection });
+    }
+    if (pointerFireActive || touchFireActive) {
+      commands.push({ type: 'firePrimary', direction: aimDirection });
+    }
+
     updateGame(state, deltaSeconds, commands);
     processRenderEvents(state.events);
   },
@@ -222,13 +291,13 @@ loop.start();
 
 function renderGame(gameState: GameState, alpha = 0) {
   renderClock += 1 / 60;
-  updateFacingDirection(gameState);
+  updateAutoAimFallback(gameState);
   playerMesh.position.set(
     gameState.player.position.x,
     0.38,
     gameState.player.position.z
   );
-  playerMesh.rotation.y = Math.atan2(lastFacingDirection.x, lastFacingDirection.z);
+  playerMesh.rotation.y = Math.atan2(aimDirection.x, aimDirection.z);
   playerMesh.children.forEach((child) => {
     if (child instanceof THREE.Mesh) {
       child.material =
@@ -351,44 +420,30 @@ function updatePickupMesh(pickup: Pickup, mesh: THREE.Group) {
 
 function createScenery() {
   const group = new THREE.Group();
-  const coverLayout: Array<[x: number, z: number, width: number, depth: number]> = [
-    [-4.8, -2.7, 2.4, 0.7],
-    [4.8, 2.7, 2.4, 0.7],
-    [-2.3, 4.9, 0.7, 2.2],
-    [2.3, -4.9, 0.7, 2.2],
-    [-5.9, 4.9, 1.5, 0.7],
-    [5.9, -4.9, 1.5, 0.7]
-  ];
-  const buildingLayout: Array<[x: number, z: number, height: number]> = [
-    [-7.2, -7.1, 2.7],
-    [-7.3, 6.8, 2.1],
-    [7.2, -6.7, 2.4],
-    [7.0, 7.0, 3.0]
-  ];
+  const map = state.map;
+  const plazaMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4f665c,
+    roughness: 0.88
+  });
+  const streetMaterial = new THREE.MeshStandardMaterial({
+    color: 0x2e4146,
+    roughness: 0.9
+  });
+  const alleyMaterial = new THREE.MeshStandardMaterial({
+    color: 0x28363b,
+    roughness: 0.92
+  });
 
-  for (const [x, z, width, depth] of coverLayout) {
-    const cover = new THREE.Mesh(cubeGeometry.clone(), coverMaterial);
-    cover.position.set(x, 0.25, z);
-    cover.scale.set(width, 0.5, depth);
-    cover.castShadow = true;
-    cover.receiveShadow = true;
-    group.add(cover);
+  group.add(createMapSurface(map.plaza, 0.012, plazaMaterial));
+  for (const street of map.streets) {
+    group.add(createMapSurface(street, 0.018, streetMaterial));
+  }
+  for (const alley of map.alleys) {
+    group.add(createMapSurface(alley, 0.024, alleyMaterial));
   }
 
-  for (const [x, z, height] of buildingLayout) {
-    const building = new THREE.Mesh(cubeGeometry.clone(), buildingMaterial);
-    building.position.set(x, height / 2 - 0.05, z);
-    building.scale.set(1.45, height, 1.45);
-    building.castShadow = true;
-    building.receiveShadow = true;
-    group.add(building);
-
-    const roof = new THREE.Mesh(cubeGeometry.clone(), roofMaterial);
-    roof.position.set(x, height + 0.08, z);
-    roof.scale.set(1.65, 0.18, 1.65);
-    roof.castShadow = true;
-    roof.receiveShadow = true;
-    group.add(roof);
+  for (const prop of [...map.cover, ...map.buildings, ...map.landmarks]) {
+    group.add(createMapProp(prop));
   }
 
   const borderMaterial = new THREE.MeshStandardMaterial({
@@ -409,6 +464,70 @@ function createScenery() {
     border.castShadow = true;
     border.receiveShadow = true;
     group.add(border);
+  }
+
+  return group;
+}
+
+function createMapSurface(
+  rect: MapRect,
+  y: number,
+  material: THREE.MeshStandardMaterial
+) {
+  const surface = new THREE.Mesh(cubeGeometry.clone(), material);
+  surface.position.set(rect.position.x, y - 0.025, rect.position.z);
+  surface.scale.set(rect.width, 0.05, rect.depth);
+  surface.receiveShadow = true;
+  return surface;
+}
+
+function createMapProp(prop: MapProp) {
+  const group = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({
+    color: prop.color,
+    emissive: prop.emissive ?? 0x000000,
+    emissiveIntensity: prop.emissive ? 0.55 : 0,
+    roughness: prop.kind === 'building' ? 0.78 : 0.68
+  });
+  const body = new THREE.Mesh(cubeGeometry.clone(), material);
+  body.position.set(prop.position.x, prop.height / 2 - 0.05, prop.position.z);
+  body.scale.set(prop.width, prop.height, prop.depth);
+  body.castShadow = true;
+  body.receiveShadow = true;
+  group.add(body);
+
+  if (prop.kind === 'building') {
+    const roof = new THREE.Mesh(
+      cubeGeometry.clone(),
+      new THREE.MeshStandardMaterial({
+        color: 0x98a66f,
+        roughness: 0.84
+      })
+    );
+    roof.position.set(prop.position.x, prop.height + 0.08, prop.position.z);
+    roof.scale.set(prop.width + 0.18, 0.16, prop.depth + 0.18);
+    roof.castShadow = true;
+    roof.receiveShadow = true;
+    group.add(roof);
+  }
+
+  if (prop.kind === 'landmark') {
+    const light = new THREE.PointLight(prop.emissive ?? 0x7dfcff, 1.35, 4.5);
+    light.position.set(prop.position.x, prop.height + 0.45, prop.position.z);
+    group.add(light);
+
+    const sign = new THREE.Mesh(
+      cubeGeometry.clone(),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: prop.emissive ?? 0x7dfcff,
+        emissiveIntensity: 1.2,
+        roughness: 0.38
+      })
+    );
+    sign.position.set(prop.position.x, prop.height * 0.68, prop.position.z - 0.37);
+    sign.scale.set(prop.width * 0.9, 0.16, 0.08);
+    group.add(sign);
   }
 
   return group;
@@ -440,7 +559,7 @@ function processRenderEvents(events: GameEvent[]) {
           (candidate) => candidate.id === event.projectileId
         );
         if (projectile) {
-          lastFacingDirection = normalize2(projectile.velocity) ?? lastFacingDirection;
+          aimDirection = normalize2(projectile.velocity) ?? aimDirection;
         }
         break;
       }
@@ -469,7 +588,16 @@ function processRenderEvents(events: GameEvent[]) {
   }
 }
 
-function updateFacingDirection(gameState: GameState) {
+function updateAutoAimFallback(gameState: GameState) {
+  if (
+    pointerFireActive ||
+    touchAimDirection ||
+    keyboardMovementDirection ||
+    gameState.enemies.length === 0
+  ) {
+    return;
+  }
+
   const closestEnemy = gameState.enemies.reduce<Enemy | null>((closest, enemy) => {
     if (!closest) {
       return enemy;
@@ -490,23 +618,13 @@ function updateFacingDirection(gameState: GameState) {
   });
 
   if (direction) {
-    lastFacingDirection = direction;
+    aimDirection = direction;
   }
 }
 
 function updateCamera(gameState: GameState, alpha: number) {
   cameraTarget.set(gameState.player.position.x, 0.8, gameState.player.position.z);
-  const behind = new THREE.Vector3(
-    -lastFacingDirection.x * 5.4,
-    7.2,
-    -lastFacingDirection.z * 5.4
-  );
-  const side = new THREE.Vector3(
-    -lastFacingDirection.z * 2.7,
-    0,
-    lastFacingDirection.x * 2.7
-  );
-  desiredCameraPosition.copy(cameraTarget).add(behind).add(side);
+  desiredCameraPosition.copy(cameraTarget).add(fixedCameraOffset);
   desiredCameraPosition.x = clamp(desiredCameraPosition.x, -11, 11);
   desiredCameraPosition.z = clamp(desiredCameraPosition.z, -11, 11);
 
@@ -554,6 +672,159 @@ function updatePickupBursts() {
   }
 }
 
+function updateAimFromPointer(event: PointerEvent) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNdc.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -(((event.clientY - rect.top) / rect.height) * 2 - 1)
+  );
+  aimRaycaster.setFromCamera(pointerNdc, camera);
+
+  const hit = aimRaycaster.ray.intersectPlane(aimPlane, aimIntersection);
+  if (!hit) {
+    return;
+  }
+
+  const direction = normalize2({
+    x: aimIntersection.x - state.player.position.x,
+    z: aimIntersection.z - state.player.position.z
+  });
+  if (direction) {
+    mouseAimActive = true;
+    aimDirection = direction;
+  }
+}
+
+function bindTouchStick(
+  kind: 'move' | 'aim',
+  layer: HTMLElement | null,
+  thumb: HTMLElement | null,
+  onChange: (direction: Vector2 | null) => void
+) {
+  const stick = thumb?.parentElement;
+  if (!layer || !stick || !thumb) {
+    return;
+  }
+
+  let activePointerId: number | null = null;
+
+  const updateStick = (event: PointerEvent) => {
+    if (activePointerId !== event.pointerId) {
+      return;
+    }
+
+    const rect = stick.getBoundingClientRect();
+    const radius = rect.width / 2;
+    const maxDistance = radius - thumb.offsetWidth / 2;
+    const rawX = event.clientX - (rect.left + radius);
+    const rawY = event.clientY - (rect.top + radius);
+    const distance = Math.hypot(rawX, rawY);
+    const limitedDistance = Math.min(distance, maxDistance);
+    const scale = distance === 0 ? 0 : limitedDistance / distance;
+    const x = rawX * scale;
+    const y = rawY * scale;
+
+    thumb.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+
+    const normalizedDistance = maxDistance === 0 ? 0 : limitedDistance / maxDistance;
+    if (normalizedDistance < 0.14) {
+      onChange(null);
+      return;
+    }
+
+    onChange({
+      x: x / maxDistance,
+      z: y / maxDistance
+    });
+  };
+
+  const resetStick = (pointerId: number) => {
+    activePointerId = null;
+    thumb.style.transform = 'translate3d(0, 0, 0)';
+    onChange(null);
+    releasePointerCapture(stick, pointerId);
+  };
+
+  stick.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse' || activePointerId !== null) {
+      return;
+    }
+
+    activePointerId = event.pointerId;
+    stick.setPointerCapture(event.pointerId);
+    updateStick(event);
+    event.preventDefault();
+  });
+
+  stick.addEventListener('pointermove', (event) => {
+    updateStick(event);
+    if (activePointerId === event.pointerId) {
+      event.preventDefault();
+    }
+  });
+
+  stick.addEventListener('pointerup', (event) => {
+    if (activePointerId === event.pointerId) {
+      resetStick(event.pointerId);
+      event.preventDefault();
+    }
+  });
+
+  stick.addEventListener('pointercancel', (event) => {
+    if (activePointerId === event.pointerId) {
+      resetStick(event.pointerId);
+      event.preventDefault();
+    }
+  });
+
+  stick.dataset.control = kind;
+}
+
+function readMovementDirection(): Vector2 | null {
+  let x = 0;
+  let z = 0;
+
+  if (pressedKeys.has('a') || pressedKeys.has('arrowleft')) {
+    x -= 1;
+  }
+  if (pressedKeys.has('d') || pressedKeys.has('arrowright')) {
+    x += 1;
+  }
+  if (pressedKeys.has('w') || pressedKeys.has('arrowup')) {
+    z -= 1;
+  }
+  if (pressedKeys.has('s') || pressedKeys.has('arrowdown')) {
+    z += 1;
+  }
+
+  keyboardMovementDirection = x === 0 && z === 0 ? null : { x, z };
+
+  if (touchMovementDirection) {
+    x += touchMovementDirection.x;
+    z += touchMovementDirection.z;
+  }
+
+  const direction = x === 0 && z === 0 ? null : { x, z };
+  if (direction && !mouseAimActive && !touchAimDirection) {
+    aimDirection = normalize2(direction) ?? aimDirection;
+  }
+
+  return direction;
+}
+
+function isMovementKey(key: string) {
+  return (
+    key === 'ArrowLeft' ||
+    key === 'ArrowRight' ||
+    key === 'ArrowUp' ||
+    key === 'ArrowDown' ||
+    key.toLowerCase() === 'w' ||
+    key.toLowerCase() === 'a' ||
+    key.toLowerCase() === 's' ||
+    key.toLowerCase() === 'd'
+  );
+}
+
 function disposeObject(object: THREE.Object3D) {
   object.traverse((child) => {
     if (child instanceof THREE.Mesh) {
@@ -580,6 +851,12 @@ function distanceSquared(a: Vector2, b: Vector2) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function releasePointerCapture(element: Element, pointerId: number) {
+  if (element.hasPointerCapture(pointerId)) {
+    element.releasePointerCapture(pointerId);
+  }
 }
 
 function updateHud(gameState: GameState) {

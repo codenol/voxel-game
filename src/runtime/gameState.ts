@@ -9,8 +9,9 @@ import type {
   RunSummary,
   Vector2
 } from './types';
+import { neonDistrictMap } from './districtMap';
+import type { MapRect } from './districtMap';
 
-const arenaRadius = 7.5;
 const enemyContactCooldown = 0.75;
 const projectileRadius = 0.16;
 
@@ -46,6 +47,7 @@ export const createGameState = (): GameState => ({
     enemiesRemaining: 0,
     spawned: false
   },
+  map: neonDistrictMap,
   runSummary: createRunSummary(),
   enemyContactCooldownRemaining: 0,
   events: [],
@@ -58,8 +60,14 @@ export const updateGame = (
   commands: GameCommand[] = []
 ): GameState => {
   state.events = [];
+  let movementDirection: Vector2 | null = null;
 
   for (const command of commands) {
+    if (command.type === 'movePlayer') {
+      movementDirection = command.direction;
+      continue;
+    }
+
     applyCommand(state, command);
   }
 
@@ -79,6 +87,7 @@ export const updateGame = (
     return state;
   }
 
+  updatePlayer(state, deltaSeconds, movementDirection);
   updateProjectiles(state, deltaSeconds);
   updateEnemies(state, deltaSeconds);
   resolveCombat(state);
@@ -101,7 +110,7 @@ const resetRun = (state: GameState) => {
   state.player.active = true;
   state.enemies = [];
   state.projectiles = [];
-  state.pickups = [];
+  state.pickups = createInitialPickups(state);
   state.runSummary = createRunSummary();
   state.wave = {
     index: 1,
@@ -155,6 +164,26 @@ const applyCommand = (state: GameState, command: GameCommand) => {
   }
 };
 
+const updatePlayer = (
+  state: GameState,
+  deltaSeconds: number,
+  movementDirection: Vector2 | null
+) => {
+  if (state.status !== 'playing' || !movementDirection) {
+    return;
+  }
+
+  const normalized = normalize(movementDirection);
+  if (!normalized) {
+    return;
+  }
+
+  moveWithCollision(state, state.player, {
+    x: normalized.x * state.player.speed * deltaSeconds,
+    z: normalized.z * state.player.speed * deltaSeconds
+  });
+};
+
 const transitionTo = (state: GameState, to: GameStatus) => {
   if (state.status === to) {
     return;
@@ -204,15 +233,15 @@ const spawnWave = (state: GameState) => {
   const enemyCount = 2 + state.wave.index;
   state.wave.enemiesRemaining = enemyCount;
   state.wave.spawned = true;
+  const spawnCount = state.map.enemySpawns.length;
 
   for (let index = 0; index < enemyCount; index += 1) {
-    const angle = (Math.PI * 2 * index) / enemyCount;
+    const spawn = state.map.enemySpawns[
+      (index + state.wave.index - 1) % spawnCount
+    ] ?? { x: 0, z: 0 };
     const enemy: Enemy = {
       id: nextId(state, 'enemy'),
-      position: {
-        x: Math.cos(angle) * 5.5,
-        z: Math.sin(angle) * 5.5
-      },
+      position: { ...spawn },
       radius: 0.42,
       active: true,
       health: 50 + state.wave.index * 12,
@@ -233,8 +262,8 @@ const updateProjectiles = (state: GameState, deltaSeconds: number) => {
 
     if (
       projectile.ttl <= 0 ||
-      Math.abs(projectile.position.x) > arenaRadius ||
-      Math.abs(projectile.position.z) > arenaRadius
+      isOutsideBounds(state, projectile.position, projectile.radius) ||
+      collidesWithMap(state.map.colliders, projectile.position, projectile.radius)
     ) {
       projectile.active = false;
     }
@@ -257,8 +286,10 @@ const updateEnemies = (state: GameState, deltaSeconds: number) => {
       continue;
     }
 
-    enemy.position.x += direction.x * enemy.speed * deltaSeconds;
-    enemy.position.z += direction.z * enemy.speed * deltaSeconds;
+    moveWithCollision(state, enemy, {
+      x: direction.x * enemy.speed * deltaSeconds,
+      z: direction.z * enemy.speed * deltaSeconds
+    });
   }
 };
 
@@ -341,9 +372,10 @@ const maybeDropPickup = (state: GameState, position: Vector2) => {
     return;
   }
 
+  const spawn = nearestLootSpawn(state, position);
   const pickup: Pickup = {
     id: nextId(state, 'pickup'),
-    position: { ...position },
+    position: { ...spawn },
     radius: 0.3,
     active: true,
     kind: 'health',
@@ -351,6 +383,16 @@ const maybeDropPickup = (state: GameState, position: Vector2) => {
   };
   state.pickups.push(pickup);
 };
+
+const createInitialPickups = (state: GameState): Pickup[] =>
+  state.map.lootSpawns.slice(0, 2).map((position) => ({
+    id: nextId(state, 'pickup'),
+    position: { ...position },
+    radius: 0.3,
+    active: true,
+    kind: 'health',
+    value: 18
+  }));
 
 const advanceWaveIfCleared = (state: GameState) => {
   if (!state.wave.spawned || state.wave.enemiesRemaining > 0) {
@@ -384,6 +426,65 @@ const removeInactiveEntities = (state: GameState) => {
   state.pickups = state.pickups.filter((pickup) => pickup.active);
 };
 
+const moveWithCollision = (
+  state: GameState,
+  entity: { position: Vector2; radius: number },
+  movement: Vector2
+) => {
+  const nextX = {
+    x: entity.position.x + movement.x,
+    z: entity.position.z
+  };
+  if (canOccupy(state, nextX, entity.radius)) {
+    entity.position.x = nextX.x;
+  }
+
+  const nextZ = {
+    x: entity.position.x,
+    z: entity.position.z + movement.z
+  };
+  if (canOccupy(state, nextZ, entity.radius)) {
+    entity.position.z = nextZ.z;
+  }
+};
+
+const canOccupy = (state: GameState, position: Vector2, radius: number) =>
+  !isOutsideBounds(state, position, radius) &&
+  !collidesWithMap(state.map.colliders, position, radius);
+
+const isOutsideBounds = (state: GameState, position: Vector2, radius: number) =>
+  position.x - radius < state.map.bounds.minX ||
+  position.x + radius > state.map.bounds.maxX ||
+  position.z - radius < state.map.bounds.minZ ||
+  position.z + radius > state.map.bounds.maxZ;
+
+const collidesWithMap = (colliders: MapRect[], position: Vector2, radius: number) =>
+  colliders.some((collider) => circleOverlapsRect(position, radius, collider));
+
+const circleOverlapsRect = (position: Vector2, radius: number, rect: MapRect) => {
+  const halfWidth = rect.width / 2;
+  const halfDepth = rect.depth / 2;
+  const closestX = clamp(
+    position.x,
+    rect.position.x - halfWidth,
+    rect.position.x + halfWidth
+  );
+  const closestZ = clamp(
+    position.z,
+    rect.position.z - halfDepth,
+    rect.position.z + halfDepth
+  );
+
+  return distanceSquared(position, { x: closestX, z: closestZ }) <= radius ** 2;
+};
+
+const nearestLootSpawn = (state: GameState, position: Vector2) =>
+  state.map.lootSpawns.reduce((nearest, spawn) =>
+    distanceSquared(position, spawn) < distanceSquared(position, nearest)
+      ? spawn
+      : nearest
+  );
+
 const overlaps = (
   a: { position: Vector2; radius: number },
   b: { position: Vector2; radius: number }
@@ -391,6 +492,9 @@ const overlaps = (
 
 const distanceSquared = (a: Vector2, b: Vector2) =>
   (a.x - b.x) ** 2 + (a.z - b.z) ** 2;
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
 const normalize = (vector: Vector2): Vector2 | null => {
   const length = Math.hypot(vector.x, vector.z);

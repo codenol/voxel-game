@@ -1,3 +1,5 @@
+import type { DistrictMap } from './districtMap';
+
 export type GameStatus =
   | 'loading'
   | 'menu'
@@ -73,6 +75,7 @@ export type GameCommand =
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'gameOver' }
+  | { type: 'movePlayer'; direction: Vector2 }
   | { type: 'firePrimary'; direction: Vector2 }
   | { type: 'collectPickup'; pickupId: string };
 
@@ -95,6 +98,7 @@ export interface GameState {
   pickups: Pickup[];
   weapons: Record<string, Weapon>;
   wave: Wave;
+  map: DistrictMap;
   runSummary: RunSummary;
   enemyContactCooldownRemaining: number;
   events: GameEvent[];
