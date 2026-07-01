@@ -55,7 +55,7 @@ export interface Projectile extends EntityBase {
 }
 
 export interface Pickup extends EntityBase {
-  kind: 'health' | 'ammo' | 'weapon';
+  kind: 'health' | 'weapon';
   value: number;
 }
 
@@ -72,7 +72,16 @@ export interface Wave {
   index: number;
   countdown: number;
   enemiesRemaining: number;
+  totalEnemies: number;
   spawned: boolean;
+  pendingSpawns: WaveSpawn[];
+  nextSpawnIn: number;
+}
+
+export interface WaveSpawn {
+  archetype: EnemyArchetype;
+  spawnIndex: number;
+  delay: number;
 }
 
 export interface RunSummary {
@@ -80,6 +89,10 @@ export interface RunSummary {
   kills: number;
   pickupsCollected: number;
   wavesCleared: number;
+  waveReached: number;
+  damageDealt: number;
+  damageTaken: number;
+  weaponsUsed: Record<string, number>;
 }
 
 export type GameCommand =

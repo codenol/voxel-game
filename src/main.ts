@@ -175,6 +175,11 @@ const pickupMaterial = new THREE.MeshStandardMaterial({
   emissive: 0x0d4f28,
   roughness: 0.5
 });
+const weaponPickupMaterial = new THREE.MeshStandardMaterial({
+  color: 0xffd166,
+  emissive: 0x6f4100,
+  roughness: 0.46
+});
 const burstMaterial = new THREE.MeshStandardMaterial({
   color: 0xfff0a6,
   emissive: 0xffb400,
@@ -522,6 +527,7 @@ function createPickupMesh() {
 
 function updatePickupMesh(pickup: Pickup, mesh: THREE.Group) {
   const pulse = renderClock < pickupPulseUntil ? 1.3 : 1;
+  const material = pickup.kind === 'weapon' ? weaponPickupMaterial : pickupMaterial;
   mesh.position.set(
     pickup.position.x,
     0.4 + Math.sin(renderClock * 5) * 0.06,
@@ -529,6 +535,11 @@ function updatePickupMesh(pickup: Pickup, mesh: THREE.Group) {
   );
   mesh.rotation.y += 0.04;
   mesh.scale.setScalar(pulse);
+  mesh.children.forEach((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.material = material;
+    }
+  });
 }
 
 function createScenery() {
@@ -1034,12 +1045,14 @@ function updateHud(gameState: GameState) {
 
   setText(healthLabel, `Health ${Math.ceil(gameState.player.health)}`);
   setText(waveLabel, `Wave ${gameState.wave.index || '-'}`);
-  setText(enemiesLabel, `Enemies ${gameState.wave.enemiesRemaining}`);
-  setText(statusLabel, statusText(gameState));
   setText(
-    summaryLabel,
-    `Kills ${gameState.runSummary.kills} | Pickups ${gameState.runSummary.pickupsCollected}`
+    enemiesLabel,
+    `Enemies ${gameState.wave.totalEnemies - gameState.wave.enemiesRemaining}/${
+      gameState.wave.totalEnemies || 0
+    }`
   );
+  setText(statusLabel, statusText(gameState));
+  setText(summaryLabel, summaryText(gameState));
 }
 
 function primaryActionLabel(gameState: GameState) {
@@ -1060,7 +1073,9 @@ function statusText(gameState: GameState) {
     case 'waveCountdown':
       return `Wave starts in ${Math.ceil(gameState.wave.countdown)}`;
     case 'playing':
-      return 'Playing';
+      return gameState.wave.pendingSpawns.length > 0
+        ? `Wave ${gameState.wave.index} deploying`
+        : `Wave ${gameState.wave.index} active`;
     case 'paused':
       return 'Paused';
     case 'gameOver':
@@ -1068,6 +1083,32 @@ function statusText(gameState: GameState) {
     case 'loading':
       return 'Loading';
   }
+}
+
+function summaryText(gameState: GameState) {
+  const weapon = gameState.weapons[gameState.player.weaponId]?.name ?? 'Unknown';
+  if (gameState.status !== 'gameOver') {
+    return `Kills ${gameState.runSummary.kills} | ${weapon} | Damage ${Math.round(
+      gameState.runSummary.damageDealt
+    )}`;
+  }
+
+  return [
+    `Reached wave ${gameState.runSummary.waveReached}`,
+    `Kills ${gameState.runSummary.kills}`,
+    `Dealt ${Math.round(gameState.runSummary.damageDealt)}`,
+    `Taken ${Math.round(gameState.runSummary.damageTaken)}`,
+    `Weapons ${formatWeaponsUsed(gameState.runSummary.weaponsUsed)}`
+  ].join(' | ');
+}
+
+function formatWeaponsUsed(weaponsUsed: Record<string, number>) {
+  const entries = Object.entries(weaponsUsed);
+  if (entries.length === 0) {
+    return 'none';
+  }
+
+  return entries.map(([name, shots]) => `${name} ${shots}`).join(', ');
 }
 
 function setText(element: HTMLElement | null, text: string) {
