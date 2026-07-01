@@ -24,17 +24,34 @@
     </div>
     <section id="hud" class="hud" aria-label="Game status">
       <div class="hud__stats">
-        <span id="health-label">Health 100</span>
+        <span id="health-label">Health 100/100</span>
+        <span id="weapon-label">Pulse Carbine</span>
+        <span id="ammo-label">Ammo ∞</span>
         <span id="wave-label">Wave -</span>
-        <span id="enemies-label">Enemies 0</span>
+        <span id="countdown-label">Next --</span>
+        <span id="enemies-label">Enemies 0/0</span>
+        <span id="score-label">Score 0</span>
+        <span id="kills-label">Kills 0</span>
       </div>
       <div class="hud__status">
         <strong id="status-label">Ready</strong>
-        <span id="summary-label">Kills 0 | Pickups 0</span>
+        <span id="summary-label">Press Start to begin</span>
       </div>
       <div class="hud__actions">
         <button id="primary-action" type="button">Start</button>
         <button id="pause-action" type="button" disabled>Pause</button>
+      </div>
+    </section>
+    <section id="menu-panel" class="menu-panel" aria-live="polite">
+      <div class="menu-panel__box">
+        <p id="menu-kicker" class="menu-panel__kicker">Voxel Survival</p>
+        <h1 id="menu-title">Ready</h1>
+        <p id="menu-copy">Clear waves, collect drops, and stay alive.</p>
+        <dl id="run-stats" class="run-stats" hidden></dl>
+        <div class="menu-panel__actions">
+          <button id="menu-primary-action" type="button">Start Run</button>
+          <button id="menu-secondary-action" type="button" hidden>Resume</button>
+        </div>
       </div>
     </section>
     <script type="module" src="/src/main.ts"></script>
