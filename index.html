@@ -14,6 +14,14 @@
   </head>
   <body>
     <canvas id="game-canvas" aria-label="Voxel game scene"></canvas>
+    <div id="touch-controls" class="touch-controls" aria-hidden="true">
+      <div class="touch-stick touch-stick--move">
+        <div id="move-stick-thumb" class="touch-stick__thumb"></div>
+      </div>
+      <div class="touch-stick touch-stick--aim">
+        <div id="aim-stick-thumb" class="touch-stick__thumb"></div>
+      </div>
+    </div>
     <section id="hud" class="hud" aria-label="Game status">
       <div class="hud__stats">
         <span id="health-label">Health 100</span>
