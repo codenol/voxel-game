@@ -8,7 +8,8 @@ import type {
   Pickup,
   Projectile,
   RunSummary,
-  Vector2
+  Vector2,
+  WaveSpawn
 } from './types';
 import { neonDistrictMap } from './districtMap';
 import type { MapRect } from './districtMap';
@@ -96,13 +97,24 @@ export const createGameState = (): GameState => ({
       cooldown: 0.28,
       projectileSpeed: 8.5,
       elapsedSinceShot: 0
+    },
+    'scatter-lance': {
+      id: 'scatter-lance',
+      name: 'Scatter Lance',
+      damage: 58,
+      cooldown: 0.58,
+      projectileSpeed: 7.4,
+      elapsedSinceShot: 0
     }
   },
   wave: {
     index: 0,
     countdown: 0,
     enemiesRemaining: 0,
-    spawned: false
+    totalEnemies: 0,
+    spawned: false,
+    pendingSpawns: [],
+    nextSpawnIn: 0
   },
   map: neonDistrictMap,
   runSummary: createRunSummary(),
@@ -135,14 +147,18 @@ export const updateGame = (
   updateWeapons(state, deltaSeconds);
 
   if (state.status === 'waveCountdown') {
+    updatePlayer(state, deltaSeconds, movementDirection);
+    collectOverlappingPickups(state);
+    removeInactiveEntities(state);
     state.wave.countdown = Math.max(0, state.wave.countdown - deltaSeconds);
     if (state.wave.countdown === 0) {
       transitionTo(state, 'playing');
-      spawnWave(state);
+      startWave(state);
     }
     return state;
   }
 
+  updateWaveSpawning(state, deltaSeconds);
   updatePlayer(state, deltaSeconds, movementDirection);
   updateProjectiles(state, deltaSeconds);
   updateEnemies(state, deltaSeconds);
@@ -157,7 +173,11 @@ const createRunSummary = (): RunSummary => ({
   elapsed: 0,
   kills: 0,
   pickupsCollected: 0,
-  wavesCleared: 0
+  wavesCleared: 0,
+  waveReached: 0,
+  damageDealt: 0,
+  damageTaken: 0,
+  weaponsUsed: {}
 });
 
 const resetRun = (state: GameState) => {
@@ -172,9 +192,15 @@ const resetRun = (state: GameState) => {
     index: 1,
     countdown: 2,
     enemiesRemaining: 0,
-    spawned: false
+    totalEnemies: 0,
+    spawned: false,
+    pendingSpawns: [],
+    nextSpawnIn: 0
   };
-  getActiveWeapon(state).elapsedSinceShot = Infinity;
+  for (const weapon of Object.values(state.weapons)) {
+    weapon.elapsedSinceShot = Infinity;
+  }
+  state.player.weaponId = 'pulse-carbine';
   transitionTo(state, 'waveCountdown');
 };
 
@@ -224,7 +250,10 @@ const updatePlayer = (
   deltaSeconds: number,
   movementDirection: Vector2 | null
 ) => {
-  if (state.status !== 'playing' || !movementDirection) {
+  if (
+    (state.status !== 'playing' && state.status !== 'waveCountdown') ||
+    !movementDirection
+  ) {
     return;
   }
 
@@ -267,6 +296,8 @@ const firePrimary = (state: GameState, direction: Vector2) => {
   }
 
   weapon.elapsedSinceShot = 0;
+  state.runSummary.weaponsUsed[weapon.name] =
+    (state.runSummary.weaponsUsed[weapon.name] ?? 0) + 1;
   const projectile: Projectile = {
     id: nextId(state, 'projectile'),
     ownerId: state.player.id,
@@ -285,36 +316,82 @@ const firePrimary = (state: GameState, direction: Vector2) => {
   emit(state, { type: 'projectileFired', projectileId: projectile.id });
 };
 
-const spawnWave = (state: GameState) => {
-  const enemyCount = 2 + state.wave.index;
-  state.wave.enemiesRemaining = enemyCount;
+const startWave = (state: GameState) => {
+  const spawns = createWaveSpawns(state.wave.index);
+  state.wave.pendingSpawns = spawns;
+  state.wave.enemiesRemaining = spawns.length;
+  state.wave.totalEnemies = spawns.length;
   state.wave.spawned = true;
-  const spawnCount = state.map.enemySpawns.length;
-  const archetypes = archetypesForWave(state.wave.index);
+  state.wave.nextSpawnIn = 0;
+  state.runSummary.waveReached = Math.max(
+    state.runSummary.waveReached,
+    state.wave.index
+  );
+  emit(state, { type: 'waveStarted', wave: state.wave.index });
+  updateWaveSpawning(state, 0);
+};
 
-  for (let index = 0; index < enemyCount; index += 1) {
-    const spawn = state.map.enemySpawns[
-      (index + state.wave.index - 1) % spawnCount
-    ] ?? { x: 0, z: 0 };
-    const archetype = archetypes[index % archetypes.length] ?? 'rusher';
-    const enemy = createEnemy(state, archetype, spawn, index);
-    state.enemies.push(enemy);
-    emit(state, { type: 'enemySpawned', enemyId: enemy.id });
+const updateWaveSpawning = (state: GameState, deltaSeconds: number) => {
+  if (!state.wave.spawned || state.wave.pendingSpawns.length === 0) {
+    return;
   }
 
-  emit(state, { type: 'waveStarted', wave: state.wave.index });
+  state.wave.nextSpawnIn = Math.max(0, state.wave.nextSpawnIn - deltaSeconds);
+
+  while (state.wave.nextSpawnIn === 0 && state.wave.pendingSpawns.length > 0) {
+    const spawnRequest = state.wave.pendingSpawns.shift();
+    if (!spawnRequest) {
+      return;
+    }
+
+    spawnEnemyFromWave(state, spawnRequest);
+    state.wave.nextSpawnIn =
+      state.wave.pendingSpawns[0]?.delay ?? Number.POSITIVE_INFINITY;
+  }
+};
+
+const spawnEnemyFromWave = (state: GameState, spawnRequest: WaveSpawn) => {
+  const spawnCount = state.map.enemySpawns.length;
+  const spawn =
+    state.map.enemySpawns[
+      (spawnRequest.spawnIndex + state.wave.index - 1) % spawnCount
+    ] ?? { x: 0, z: 0 };
+  const enemy = createEnemy(
+    state,
+    spawnRequest.archetype,
+    spawn,
+    spawnRequest.spawnIndex
+  );
+  state.enemies.push(enemy);
+  emit(state, { type: 'enemySpawned', enemyId: enemy.id });
+};
+
+const createWaveSpawns = (waveIndex: number): WaveSpawn[] => {
+  const enemyCount = 3 + waveIndex + Math.floor(waveIndex * 0.55);
+  const delay = Math.max(0.46, 1.1 - waveIndex * 0.08);
+  const archetypes = archetypesForWave(waveIndex);
+
+  return Array.from({ length: enemyCount }, (_, index) => ({
+    archetype: archetypes[index % archetypes.length] ?? 'rusher',
+    spawnIndex: index,
+    delay: index === 0 ? 0 : delay
+  }));
 };
 
 const archetypesForWave = (waveIndex: number): EnemyArchetype[] => {
   if (waveIndex === 1) {
-    return ['rusher', 'shooter', 'tank'];
+    return ['rusher', 'rusher', 'shooter'];
   }
 
   if (waveIndex === 2) {
-    return ['rusher', 'shooter', 'flanker', 'tank'];
+    return ['rusher', 'shooter', 'rusher', 'flanker'];
   }
 
-  return ['rusher', 'shooter', 'tank', 'flanker'];
+  if (waveIndex === 3) {
+    return ['rusher', 'shooter', 'flanker', 'tank', 'rusher'];
+  }
+
+  return ['rusher', 'shooter', 'flanker', 'rusher', 'tank', 'shooter'];
 };
 
 const createEnemy = (
@@ -324,8 +401,9 @@ const createEnemy = (
   spawnIndex: number
 ): Enemy => {
   const template = enemyArchetypes[archetype];
-  const waveHealthBonus = state.wave.index * (archetype === 'tank' ? 16 : 9);
-  const speedBonus = Math.min(0.36, state.wave.index * 0.04);
+  const waveHealthBonus =
+    Math.max(0, state.wave.index - 1) * (archetype === 'tank' ? 14 : 7);
+  const speedBonus = Math.min(0.34, Math.max(0, state.wave.index - 1) * 0.035);
 
   return {
     id: nextId(state, 'enemy'),
@@ -336,7 +414,7 @@ const createEnemy = (
     health: template.health + waveHealthBonus,
     maxHealth: template.health + waveHealthBonus,
     speed: template.speed + speedBonus,
-    damage: template.damage + Math.floor(state.wave.index / 2),
+    damage: template.damage + Math.floor(Math.max(0, state.wave.index - 1) / 2),
     attackRange: template.attackRange,
     attackCooldown: template.attackCooldown,
     attackCooldownRemaining: 0.35 + spawnIndex * 0.12,
@@ -553,7 +631,9 @@ const resolveCombat = (state: GameState) => {
     }
 
     projectile.active = false;
+    const damageDealt = Math.min(projectile.damage, hitEnemy.health);
     hitEnemy.health -= projectile.damage;
+    state.runSummary.damageDealt += damageDealt;
     emit(state, { type: 'enemyDamaged', enemyId: hitEnemy.id });
 
     if (hitEnemy.health <= 0) {
@@ -561,15 +641,13 @@ const resolveCombat = (state: GameState) => {
     }
   }
 
-  for (const pickup of state.pickups) {
-    if (pickup.active && overlaps(state.player, pickup)) {
-      collectPickup(state, pickup.id);
-    }
-  }
+  collectOverlappingPickups(state);
 };
 
 const damagePlayer = (state: GameState, amount: number) => {
+  const damageTaken = Math.min(amount, state.player.health);
   state.player.health = Math.max(0, state.player.health - amount);
+  state.runSummary.damageTaken += damageTaken;
   emit(state, {
     type: 'playerDamaged',
     amount,
@@ -603,6 +681,14 @@ const collectPickup = (state: GameState, pickupId: string) => {
       state.player.maxHealth,
       state.player.health + pickup.value
     );
+  } else if (pickup.kind === 'weapon') {
+    const weapon = state.weapons['scatter-lance'];
+    if (!weapon) {
+      return;
+    }
+
+    state.player.weaponId = 'scatter-lance';
+    weapon.elapsedSinceShot = Infinity;
   }
 
   emit(state, {
@@ -613,7 +699,7 @@ const collectPickup = (state: GameState, pickupId: string) => {
 };
 
 const maybeDropPickup = (state: GameState, position: Vector2) => {
-  if (state.runSummary.kills % 3 !== 0) {
+  if (state.runSummary.kills % 4 !== 0) {
     return;
   }
 
@@ -639,20 +725,59 @@ const createInitialPickups = (state: GameState): Pickup[] =>
     value: 18
   }));
 
+const collectOverlappingPickups = (state: GameState) => {
+  for (const pickup of state.pickups) {
+    if (pickup.active && overlaps(state.player, pickup)) {
+      collectPickup(state, pickup.id);
+    }
+  }
+};
+
 const advanceWaveIfCleared = (state: GameState) => {
-  if (!state.wave.spawned || state.wave.enemiesRemaining > 0) {
+  if (
+    !state.wave.spawned ||
+    state.wave.enemiesRemaining > 0 ||
+    state.wave.pendingSpawns.length > 0
+  ) {
     return;
   }
 
   emit(state, { type: 'waveCleared', wave: state.wave.index });
   state.runSummary.wavesCleared = state.wave.index;
+  createBetweenWaveLoot(state);
   state.wave = {
     index: state.wave.index + 1,
-    countdown: 3,
+    countdown: 4,
     enemiesRemaining: 0,
-    spawned: false
+    totalEnemies: 0,
+    spawned: false,
+    pendingSpawns: [],
+    nextSpawnIn: 0
   };
   transitionTo(state, 'waveCountdown');
+};
+
+const createBetweenWaveLoot = (state: GameState) => {
+  const rewardCount = state.wave.index % 3 === 0 ? 3 : 2;
+  for (let index = 0; index < rewardCount; index += 1) {
+    const spawn =
+      state.map.lootSpawns[
+        (state.wave.index + index * 2) % state.map.lootSpawns.length
+      ] ?? { x: 0, z: 0 };
+    state.pickups.push({
+      id: nextId(state, 'pickup'),
+      position: { ...spawn },
+      radius: 0.3,
+      active: true,
+      kind:
+        state.wave.index >= 2 &&
+        index === rewardCount - 1 &&
+        state.player.weaponId !== 'scatter-lance'
+          ? 'weapon'
+          : 'health',
+      value: 20 + Math.min(12, state.wave.index * 2)
+    });
+  }
 };
 
 const endRun = (state: GameState) => {
